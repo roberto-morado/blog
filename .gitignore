@@ -1,0 +1,14 @@
+# Environment variables
+.env
+
+# Deno KV database
+*.db
+*.sqlite
+*.sqlite3
+
+# Deno directory
+.deno/
+
+# OS files
+.DS_Store
+Thumbs.db
