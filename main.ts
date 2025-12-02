@@ -1,5 +1,5 @@
 // ============================================================================
-// DENO BLOG - Single File Application
+// DENO BLOG - Admin Dashboard with Analytics
 // ============================================================================
 
 // ============================================================================
@@ -29,11 +29,51 @@ interface Post {
   createdAt: string;
   updatedAt: string;
   published: boolean;
+  views: number;
+  likes: number;
 }
 
 interface Session {
   userId: string;
   expiresAt: number;
+}
+
+interface Visitor {
+  id: string;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+interface PostLike {
+  postId: string;
+  visitorId: string;
+  timestamp: string;
+}
+
+interface PostView {
+  postId: string;
+  visitorId: string;
+  timestamp: string;
+}
+
+interface Analytics {
+  totalPosts: number;
+  totalViews: number;
+  totalLikes: number;
+  totalVisitors: number;
+  mostViewedPosts: Array<{ post: Post; views: number }>;
+  mostLikedPosts: Array<{ post: Post; likes: number }>;
+  recentViews: number;
+  recentLikes: number;
+}
+
+interface DatabaseStats {
+  users: number;
+  posts: number;
+  sessions: number;
+  visitors: number;
+  likes: number;
+  views: number;
 }
 
 // ============================================================================
@@ -117,6 +157,17 @@ class Database {
     if (post) {
       await this.kv.delete(["posts", id]);
       await this.kv.delete(["posts_by_date", post.createdAt, id]);
+
+      // Clean up associated data
+      const likes = this.kv.list({ prefix: ["post_likes", id] });
+      for await (const entry of likes) {
+        await this.kv.delete(entry.key);
+      }
+
+      const views = this.kv.list({ prefix: ["post_views", id] });
+      for await (const entry of views) {
+        await this.kv.delete(entry.key);
+      }
     }
   }
 
@@ -148,6 +199,164 @@ class Database {
 
   async deleteSession(sessionId: string): Promise<void> {
     await this.kv.delete(["sessions", sessionId]);
+  }
+
+  // Visitor Operations
+  async createVisitor(visitor: Visitor): Promise<void> {
+    await this.kv.set(["visitors", visitor.id], visitor);
+  }
+
+  async getVisitor(id: string): Promise<Visitor | null> {
+    const result = await this.kv.get<Visitor>(["visitors", id]);
+    return result.value;
+  }
+
+  async updateVisitor(visitor: Visitor): Promise<void> {
+    await this.kv.set(["visitors", visitor.id], visitor);
+  }
+
+  // Like Operations
+  async recordLike(postId: string, visitorId: string): Promise<boolean> {
+    const key = ["post_likes", postId, visitorId];
+    const existing = await this.kv.get(key);
+
+    if (existing.value) {
+      return false; // Already liked
+    }
+
+    const like: PostLike = {
+      postId,
+      visitorId,
+      timestamp: new Date().toISOString(),
+    };
+
+    await this.kv.set(key, like);
+
+    // Increment post like counter
+    const post = await this.getPost(postId);
+    if (post) {
+      post.likes += 1;
+      await this.updatePost(post);
+    }
+
+    return true;
+  }
+
+  async hasUserLiked(postId: string, visitorId: string): Promise<boolean> {
+    const result = await this.kv.get(["post_likes", postId, visitorId]);
+    return result.value !== null;
+  }
+
+  async getLikeCount(postId: string): Promise<number> {
+    let count = 0;
+    const entries = this.kv.list({ prefix: ["post_likes", postId] });
+
+    for await (const _ of entries) {
+      count++;
+    }
+
+    return count;
+  }
+
+  // View Operations
+  async recordView(postId: string, visitorId: string): Promise<void> {
+    const key = ["post_views", postId, visitorId, Date.now().toString()];
+    const view: PostView = {
+      postId,
+      visitorId,
+      timestamp: new Date().toISOString(),
+    };
+
+    await this.kv.set(key, view);
+
+    // Increment post view counter
+    const post = await this.getPost(postId);
+    if (post) {
+      post.views += 1;
+      await this.updatePost(post);
+    }
+  }
+
+  async getViewCount(postId: string): Promise<number> {
+    let count = 0;
+    const entries = this.kv.list({ prefix: ["post_views", postId] });
+
+    for await (const _ of entries) {
+      count++;
+    }
+
+    return count;
+  }
+
+  // Database Management
+  async getDatabaseStats(): Promise<DatabaseStats> {
+    const stats: DatabaseStats = {
+      users: 0,
+      posts: 0,
+      sessions: 0,
+      visitors: 0,
+      likes: 0,
+      views: 0,
+    };
+
+    // Count users
+    const users = this.kv.list({ prefix: ["users"] });
+    for await (const _ of users) stats.users++;
+
+    // Count posts
+    const posts = this.kv.list({ prefix: ["posts"] });
+    for await (const entry of posts) {
+      if (entry.key.length === 2) stats.posts++;
+    }
+
+    // Count sessions
+    const sessions = this.kv.list({ prefix: ["sessions"] });
+    for await (const _ of sessions) stats.sessions++;
+
+    // Count visitors
+    const visitors = this.kv.list({ prefix: ["visitors"] });
+    for await (const _ of visitors) stats.visitors++;
+
+    // Count likes
+    const likes = this.kv.list({ prefix: ["post_likes"] });
+    for await (const entry of likes) {
+      if (entry.key.length === 3) stats.likes++;
+    }
+
+    // Count views
+    const views = this.kv.list({ prefix: ["post_views"] });
+    for await (const entry of views) {
+      if (entry.key.length === 4) stats.views++;
+    }
+
+    return stats;
+  }
+
+  async cleanDatabase(collection?: string): Promise<void> {
+    if (collection) {
+      const entries = this.kv.list({ prefix: [collection] });
+      for await (const entry of entries) {
+        await this.kv.delete(entry.key);
+      }
+    } else {
+      // Clean everything except users
+      const collections = ["sessions", "visitors", "post_likes", "post_views"];
+
+      for (const coll of collections) {
+        const entries = this.kv.list({ prefix: [coll] });
+        for await (const entry of entries) {
+          await this.kv.delete(entry.key);
+        }
+      }
+
+      // Reset post counters
+      const posts = await this.getAllPosts();
+      for (const post of posts) {
+        post.views = 0;
+        post.likes = 0;
+        await this.updatePost(post);
+      }
+    }
   }
 }
 
@@ -236,6 +445,116 @@ class AuthService {
 }
 
 // ============================================================================
+// VISITOR SERVICE
+// ============================================================================
+
+class VisitorService {
+  static getCookieValue(
+    cookieHeader: string | null,
+    name: string
+  ): string | null {
+    if (!cookieHeader) return null;
+
+    const cookies = cookieHeader.split(";");
+    for (const cookie of cookies) {
+      const [cookieName, value] = cookie.trim().split("=");
+      if (cookieName === name) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  static createVisitorCookie(visitorId: string): string {
+    return `visitor=${visitorId}; Path=/; Max-Age=31536000; SameSite=Strict`; // 1 year
+  }
+
+  static async getOrCreateVisitor(
+    db: Database,
+    request: Request
+  ): Promise<{ visitor: Visitor; isNew: boolean; cookie?: string }> {
+    const cookieHeader = request.headers.get("cookie");
+    const visitorId = this.getCookieValue(cookieHeader, "visitor");
+
+    if (visitorId) {
+      const visitor = await db.getVisitor(visitorId);
+      if (visitor) {
+        // Update last seen
+        visitor.lastSeen = new Date().toISOString();
+        await db.updateVisitor(visitor);
+        return { visitor, isNew: false };
+      }
+    }
+
+    // Create new visitor
+    const newVisitorId = crypto.randomUUID();
+    const newVisitor: Visitor = {
+      id: newVisitorId,
+      firstSeen: new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+    };
+
+    await db.createVisitor(newVisitor);
+
+    return {
+      visitor: newVisitor,
+      isNew: true,
+      cookie: this.createVisitorCookie(newVisitorId),
+    };
+  }
+}
+
+// ============================================================================
+// ANALYTICS SERVICE
+// ============================================================================
+
+class AnalyticsService {
+  static async getAnalytics(db: Database): Promise<Analytics> {
+    const posts = await db.getAllPosts();
+    const stats = await db.getDatabaseStats();
+
+    // Calculate totals
+    const totalPosts = posts.length;
+    const totalViews = posts.reduce((sum, post) => sum + post.views, 0);
+    const totalLikes = posts.reduce((sum, post) => sum + post.likes, 0);
+    const totalVisitors = stats.visitors;
+
+    // Most viewed posts (top 5)
+    const mostViewedPosts = posts
+      .sort((a, b) => b.views - a.views)
+      .slice(0, 5)
+      .map((post) => ({ post, views: post.views }));
+
+    // Most liked posts (top 5)
+    const mostLikedPosts = posts
+      .sort((a, b) => b.likes - a.likes)
+      .slice(0, 5)
+      .map((post) => ({ post, likes: post.likes }));
+
+    // Recent activity (last 7 days)
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    let recentViews = 0;
+    let recentLikes = 0;
+
+    // This is a simplified version - in production you'd filter by timestamp
+    // For now, we'll just return total counts (can be improved with timestamped queries)
+    recentViews = totalViews;
+    recentLikes = totalLikes;
+
+    return {
+      totalPosts,
+      totalViews,
+      totalLikes,
+      totalVisitors,
+      mostViewedPosts,
+      mostLikedPosts,
+      recentViews,
+      recentLikes,
+    };
+  }
+}
+
+// ============================================================================
 // MARKDOWN PROCESSOR
 // ============================================================================
 
@@ -301,7 +620,8 @@ class Templates {
   static baseHTML(
     title: string,
     content: string,
-    isAuthenticated = false
+    isAuthenticated = false,
+    isPublicPost = false
   ): string {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -321,7 +641,7 @@ class Templates {
       line-height: 1.6;
       color: ${settings.theme.primaryColor};
       background-color: ${settings.theme.backgroundColor};
-      max-width: 800px;
+      ${isPublicPost ? "max-width: 800px;" : "max-width: 1200px;"}
       margin: 0 auto;
       padding: 20px;
     }
@@ -390,6 +710,71 @@ class Templates {
       color: white;
     }
 
+    .button-small {
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+
+    .analytics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+
+    .stat-card {
+      background-color: #f8f9fa;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 2.5rem;
+      font-weight: 700;
+      color: ${settings.theme.accentColor};
+      display: block;
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-label {
+      font-size: 0.9rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .table-container {
+      overflow-x: auto;
+      margin-bottom: 40px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: white;
+      border: 2px solid #e0e0e0;
+    }
+
+    th, td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    th {
+      background-color: #f8f9fa;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.85rem;
+      letter-spacing: 0.5px;
+    }
+
+    tr:hover {
+      background-color: #f8f9fa;
+    }
+
     .post {
       margin-bottom: 3em;
       padding-bottom: 2em;
@@ -455,6 +840,38 @@ class Templates {
       padding: 0;
     }
 
+    .like-section {
+      margin-top: 2em;
+      padding-top: 2em;
+      border-top: 1px solid #e0e0e0;
+      text-align: center;
+    }
+
+    .like-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      background-color: transparent;
+      border: 2px solid #e0e0e0;
+      border-radius: 50px;
+      font-size: 1.1rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .like-button:hover:not(.liked) {
+      border-color: #ff6b6b;
+      color: #ff6b6b;
+    }
+
+    .like-button.liked {
+      border-color: #ff6b6b;
+      background-color: #ff6b6b;
+      color: white;
+      cursor: default;
+    }
+
     .empty-state {
       text-align: center;
       padding: 4em 2em;
@@ -482,7 +899,8 @@ class Templates {
 
     input[type="text"],
     input[type="password"],
-    textarea {
+    textarea,
+    select {
       width: 100%;
       padding: 10px;
       border: 2px solid #e0e0e0;
@@ -498,7 +916,8 @@ class Templates {
     }
 
     input:focus,
-    textarea:focus {
+    textarea:focus,
+    select:focus {
       outline: none;
       border-color: ${settings.theme.accentColor};
     }
@@ -545,6 +964,44 @@ class Templates {
       border-color: ${settings.theme.accentColor};
       background-color: #f0f8ff;
     }
+
+    .section {
+      margin-bottom: 60px;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .db-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    .db-stat {
+      background-color: #f8f9fa;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      padding: 15px;
+      text-align: center;
+    }
+
+    .db-stat-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: ${settings.theme.primaryColor};
+    }
+
+    .db-stat-label {
+      font-size: 0.8rem;
+      color: #666;
+      text-transform: uppercase;
+    }
   </style>
 </head>
 <body>
@@ -554,7 +1011,7 @@ class Templates {
       ${
         isAuthenticated
           ? '<a href="/editor" class="button">New Post</a> <a href="/logout" class="button button-secondary">Logout</a>'
-          : '<a href="/login" class="button">Login</a>'
+          : ""
       }
     </nav>
   </header>
@@ -565,45 +1022,132 @@ class Templates {
 </html>`;
   }
 
-  static homepage(posts: Post[], isAuthenticated: boolean): string {
-    if (posts.length === 0) {
-      const content = `
-        <div class="empty-state">
-          <h2>No posts yet</h2>
-          <p>Start writing your first blog post!</p>
-          ${
-            isAuthenticated
-              ? '<a href="/editor" class="button">Create Post</a>'
-              : ""
-          }
+  static dashboard(analytics: Analytics, posts: Post[], dbStats: DatabaseStats): string {
+    const analyticsHTML = `
+      <div class="section">
+        <h2>📊 Analytics Overview</h2>
+        <div class="analytics-grid">
+          <div class="stat-card">
+            <span class="stat-value">${analytics.totalPosts}</span>
+            <span class="stat-label">Total Posts</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-value">${analytics.totalViews}</span>
+            <span class="stat-label">Total Views</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-value">${analytics.totalLikes}</span>
+            <span class="stat-label">Total Likes</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-value">${analytics.totalVisitors}</span>
+            <span class="stat-label">Visitors</span>
+          </div>
         </div>
-      `;
-      return this.baseHTML("Home", content, isAuthenticated);
-    }
+      </div>
+    `;
 
-    const postsHTML = posts
-      .map(
-        (post) => `
-      <article class="post">
-        <h2 class="post-title">
-          <a href="/post/${post.id}">${this.escapeHTML(post.title)}</a>
-        </h2>
-        <div class="post-meta">
-          ${new Date(post.createdAt).toLocaleDateString("en-US", {
-            year: "numeric",
-            month: "long",
-            day: "numeric",
-          })}
+    const postsTableHTML = `
+      <div class="section">
+        <div class="section-header">
+          <h2>📝 Post Management</h2>
+          <a href="/editor" class="button">New Post</a>
         </div>
-      </article>
-    `
-      )
-      .join("");
+        ${
+          posts.length === 0
+            ? '<div class="empty-state"><p>No posts yet. Create your first post!</p></div>'
+            : `
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Views</th>
+                <th>Likes</th>
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${posts
+                .map(
+                  (post) => `
+                <tr>
+                  <td><strong>${this.escapeHTML(post.title)}</strong></td>
+                  <td>${post.views}</td>
+                  <td>${post.likes}</td>
+                  <td>${new Date(post.createdAt).toLocaleDateString()}</td>
+                  <td>
+                    <a href="/post/${post.id}" class="button button-small" target="_blank">View</a>
+                    <a href="/editor?id=${post.id}" class="button button-small button-secondary">Edit</a>
+                    <form method="POST" action="/api/posts/${post.id}/delete" style="display: inline;">
+                      <button type="submit" class="button button-small button-danger" onclick="return confirm('Delete this post?')">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+        `
+        }
+      </div>
+    `;
 
-    return this.baseHTML("Home", postsHTML, isAuthenticated);
+    const databaseHTML = `
+      <div class="section">
+        <div class="section-header">
+          <h2>🗄️ Database Management</h2>
+        </div>
+        <div class="db-stats">
+          <div class="db-stat">
+            <div class="db-stat-value">${dbStats.users}</div>
+            <div class="db-stat-label">Users</div>
+          </div>
+          <div class="db-stat">
+            <div class="db-stat-value">${dbStats.posts}</div>
+            <div class="db-stat-label">Posts</div>
+          </div>
+          <div class="db-stat">
+            <div class="db-stat-value">${dbStats.sessions}</div>
+            <div class="db-stat-label">Sessions</div>
+          </div>
+          <div class="db-stat">
+            <div class="db-stat-value">${dbStats.visitors}</div>
+            <div class="db-stat-label">Visitors</div>
+          </div>
+          <div class="db-stat">
+            <div class="db-stat-value">${dbStats.likes}</div>
+            <div class="db-stat-label">Likes</div>
+          </div>
+          <div class="db-stat">
+            <div class="db-stat-value">${dbStats.views}</div>
+            <div class="db-stat-label">Views</div>
+          </div>
+        </div>
+        <div class="actions">
+          <form method="POST" action="/api/database/clean" style="display: inline;">
+            <input type="hidden" name="collection" value="sessions">
+            <button type="submit" class="button button-secondary" onclick="return confirm('Clean expired sessions?')">Clean Sessions</button>
+          </form>
+          <form method="POST" action="/api/database/clean" style="display: inline;">
+            <input type="hidden" name="collection" value="visitors">
+            <button type="submit" class="button button-secondary" onclick="return confirm('Clean visitor data?')">Clean Visitors</button>
+          </form>
+          <form method="POST" action="/api/database/clean" style="display: inline;">
+            <button type="submit" class="button button-danger" onclick="return confirm('This will reset all views and likes! Continue?')">Reset Analytics</button>
+          </form>
+        </div>
+      </div>
+    `;
+
+    const content = analyticsHTML + postsTableHTML + databaseHTML;
+    return this.baseHTML("Dashboard", content, true, false);
   }
 
-  static postView(post: Post, isAuthenticated: boolean): string {
+  static postView(post: Post, hasLiked: boolean): string {
     const content = `
       <article class="post">
         <h2 class="post-title">${this.escapeHTML(post.title)}</h2>
@@ -612,41 +1156,29 @@ class Templates {
             year: "numeric",
             month: "long",
             day: "numeric",
-          })}
-          ${
-            post.updatedAt !== post.createdAt
-              ? ` • Updated ${new Date(post.updatedAt).toLocaleDateString(
-                  "en-US",
-                  { year: "numeric", month: "long", day: "numeric" }
-                )}`
-              : ""
-          }
+          })} • ${post.views} views
         </div>
         <div class="post-content">
           ${MarkdownProcessor.toHTML(post.content)}
         </div>
-        ${
-          isAuthenticated
-            ? `
-          <div class="post-actions">
-            <a href="/editor?id=${post.id}" class="button">Edit</a>
-            <form method="POST" action="/api/posts/${post.id}/delete" style="display: inline;">
-              <button type="submit" class="button button-danger" onclick="return confirm('Are you sure you want to delete this post?')">Delete</button>
-            </form>
-          </div>
-        `
-            : ""
-        }
+        <div class="like-section">
+          <form method="POST" action="/api/posts/${post.id}/like" style="display: inline;">
+            <button type="submit" class="like-button ${hasLiked ? "liked" : ""}" ${hasLiked ? "disabled" : ""}>
+              <span>${hasLiked ? "❤️" : "🤍"}</span>
+              <span>${post.likes} ${post.likes === 1 ? "like" : "likes"}</span>
+            </button>
+          </form>
+        </div>
       </article>
     `;
 
-    return this.baseHTML(post.title, content, isAuthenticated);
+    return this.baseHTML(post.title, content, false, true);
   }
 
   static loginPage(error?: string): string {
     const content = `
       ${error ? `<div class="error">${this.escapeHTML(error)}</div>` : ""}
-      <h2>Login</h2>
+      <h2>Admin Login</h2>
       <form method="POST" action="/login">
         <div class="form-group">
           <label for="username">Username</label>
@@ -660,7 +1192,7 @@ class Templates {
       </form>
     `;
 
-    return this.baseHTML("Login", content, false);
+    return this.baseHTML("Login", content, false, false);
   }
 
   static editorPage(post?: Post): string {
@@ -724,7 +1256,6 @@ class Templates {
         function handleDrop(e) {
           const dt = e.dataTransfer;
           const files = dt.files;
-
           handleFiles(files);
         }
 
@@ -735,17 +1266,13 @@ class Templates {
 
               reader.onload = (e) => {
                 const base64 = e.target.result;
-                const filename = file.name;
                 const markdown = \`![Image](\${base64})\`;
 
-                // Insert at cursor position
                 const cursorPos = textarea.selectionStart;
                 const textBefore = textarea.value.substring(0, cursorPos);
                 const textAfter = textarea.value.substring(cursorPos);
 
                 textarea.value = textBefore + markdown + '\\n' + textAfter;
-
-                // Move cursor after inserted text
                 textarea.selectionStart = textarea.selectionEnd = cursorPos + markdown.length + 1;
                 textarea.focus();
               };
@@ -755,7 +1282,6 @@ class Templates {
           });
         }
 
-        // Also handle paste events
         textarea.addEventListener('paste', (e) => {
           const items = e.clipboardData.items;
 
@@ -774,7 +1300,8 @@ class Templates {
     return this.baseHTML(
       isEdit ? "Edit Post" : "New Post",
       content,
-      true
+      true,
+      false
     );
   }
 
@@ -806,18 +1333,20 @@ class Router {
     const path = url.pathname;
     const method = request.method;
 
-    // Check authentication for protected routes
+    // Check authentication
     const isAuthenticated = await AuthService.isAuthenticated(
       this.db,
       request
     );
 
     // Public routes
-    if (path === "/" && method === "GET") {
-      return this.handleHomepage(isAuthenticated);
-    }
-
     if (path === "/login" && method === "GET") {
+      if (isAuthenticated) {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "/" },
+        });
+      }
       return new Response(Templates.loginPage(), {
         headers: { "Content-Type": "text/html" },
       });
@@ -827,21 +1356,30 @@ class Router {
       return this.handleLogin(request);
     }
 
-    if (path === "/logout" && method === "GET") {
-      return this.handleLogout(request);
-    }
-
     if (path.startsWith("/post/") && method === "GET") {
       const postId = path.split("/")[2];
-      return this.handlePostView(postId, isAuthenticated);
+      return this.handlePostView(postId, request);
     }
 
-    // Protected routes
+    if (path.match(/^\/api\/posts\/[^/]+\/like$/) && method === "POST") {
+      const postId = path.split("/")[3];
+      return this.handleLikePost(postId, request);
+    }
+
+    // Protected routes - require authentication
     if (!isAuthenticated) {
       return new Response(null, {
         status: 302,
         headers: { Location: "/login" },
       });
+    }
+
+    if (path === "/" && method === "GET") {
+      return this.handleDashboard();
+    }
+
+    if (path === "/logout" && method === "GET") {
+      return this.handleLogout(request);
     }
 
     if (path === "/editor" && method === "GET") {
@@ -866,12 +1404,19 @@ class Router {
       return this.handleDeletePost(postId);
     }
 
+    if (path === "/api/database/clean" && method === "POST") {
+      return this.handleCleanDatabase(request);
+    }
+
     return new Response("Not Found", { status: 404 });
   }
 
-  private async handleHomepage(isAuthenticated: boolean): Promise<Response> {
+  private async handleDashboard(): Promise<Response> {
+    const analytics = await AnalyticsService.getAnalytics(this.db);
     const posts = await this.db.getAllPosts();
-    const html = Templates.homepage(posts, isAuthenticated);
+    const dbStats = await this.db.getDatabaseStats();
+
+    const html = Templates.dashboard(analytics, posts, dbStats);
     return new Response(html, {
       headers: { "Content-Type": "text/html" },
     });
@@ -916,7 +1461,7 @@ class Router {
     return new Response(null, {
       status: 302,
       headers: {
-        Location: "/",
+        Location: "/login",
         "Set-Cookie":
           "session=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict",
       },
@@ -925,7 +1470,7 @@ class Router {
 
   private async handlePostView(
     postId: string,
-    isAuthenticated: boolean
+    request: Request
   ): Promise<Response> {
     const post = await this.db.getPost(postId);
 
@@ -933,9 +1478,56 @@ class Router {
       return new Response("Post not found", { status: 404 });
     }
 
-    const html = Templates.postView(post, isAuthenticated);
-    return new Response(html, {
-      headers: { "Content-Type": "text/html" },
+    // Get or create visitor
+    const { visitor, isNew, cookie } = await VisitorService.getOrCreateVisitor(
+      this.db,
+      request
+    );
+
+    // Record view
+    await this.db.recordView(postId, visitor.id);
+
+    // Check if user has liked this post
+    const hasLiked = await this.db.hasUserLiked(postId, visitor.id);
+
+    const html = Templates.postView(post, hasLiked);
+    const headers: HeadersInit = { "Content-Type": "text/html" };
+
+    if (cookie) {
+      headers["Set-Cookie"] = cookie;
+    }
+
+    return new Response(html, { headers });
+  }
+
+  private async handleLikePost(
+    postId: string,
+    request: Request
+  ): Promise<Response> {
+    const post = await this.db.getPost(postId);
+
+    if (!post) {
+      return new Response("Post not found", { status: 404 });
+    }
+
+    // Get or create visitor
+    const { visitor, cookie } = await VisitorService.getOrCreateVisitor(
+      this.db,
+      request
+    );
+
+    // Record like
+    await this.db.recordLike(postId, visitor.id);
+
+    const headers: HeadersInit = { Location: `/post/${postId}` };
+
+    if (cookie) {
+      headers["Set-Cookie"] = cookie;
+    }
+
+    return new Response(null, {
+      status: 302,
+      headers,
     });
   }
 
@@ -967,13 +1559,15 @@ class Router {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       published: true,
+      views: 0,
+      likes: 0,
     };
 
     await this.db.createPost(post);
 
     return new Response(null, {
       status: 302,
-      headers: { Location: `/post/${post.id}` },
+      headers: { Location: "/" },
     });
   }
 
@@ -1002,12 +1596,24 @@ class Router {
 
     return new Response(null, {
       status: 302,
-      headers: { Location: `/post/${postId}` },
+      headers: { Location: "/" },
     });
   }
 
   private async handleDeletePost(postId: string): Promise<Response> {
     await this.db.deletePost(postId);
+
+    return new Response(null, {
+      status: 302,
+      headers: { Location: "/" },
+    });
+  }
+
+  private async handleCleanDatabase(request: Request): Promise<Response> {
+    const formData = await request.formData();
+    const collection = formData.get("collection")?.toString();
+
+    await this.db.cleanDatabase(collection);
 
     return new Response(null, {
       status: 302,
