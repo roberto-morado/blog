@@ -1011,7 +1011,7 @@ class Templates {
       ${
         isAuthenticated
           ? '<a href="/editor" class="button">New Post</a> <a href="/logout" class="button button-secondary">Logout</a>'
-          : ""
+          : '<a href="/login" class="button">Login</a>'
       }
     </nav>
   </header>
@@ -1145,6 +1145,39 @@ class Templates {
 
     const content = analyticsHTML + postsTableHTML + databaseHTML;
     return this.baseHTML("Dashboard", content, true, false);
+  }
+
+  static homepage(posts: Post[]): string {
+    if (posts.length === 0) {
+      const content = `
+        <div class="empty-state">
+          <h2>No posts yet</h2>
+          <p>Check back soon for new content!</p>
+        </div>
+      `;
+      return this.baseHTML("Home", content, false, false);
+    }
+
+    const postsHTML = posts
+      .map(
+        (post) => `
+      <article class="post">
+        <h2 class="post-title">
+          <a href="/post/${post.id}">${this.escapeHTML(post.title)}</a>
+        </h2>
+        <div class="post-meta">
+          ${new Date(post.createdAt).toLocaleDateString("en-US", {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          })} • ${post.views} views • ${post.likes} likes
+        </div>
+      </article>
+    `
+      )
+      .join("");
+
+    return this.baseHTML("Home", postsHTML, false, false);
   }
 
   static postView(post: Post, hasLiked: boolean): string {
@@ -1366,16 +1399,21 @@ class Router {
       return this.handleLikePost(postId, request);
     }
 
+    // Homepage - public list of posts for visitors, dashboard for admin
+    if (path === "/" && method === "GET") {
+      if (isAuthenticated) {
+        return this.handleDashboard();
+      } else {
+        return this.handleHomepage();
+      }
+    }
+
     // Protected routes - require authentication
     if (!isAuthenticated) {
       return new Response(null, {
         status: 302,
         headers: { Location: "/login" },
       });
-    }
-
-    if (path === "/" && method === "GET") {
-      return this.handleDashboard();
     }
 
     if (path === "/logout" && method === "GET") {
@@ -1417,6 +1455,14 @@ class Router {
     const dbStats = await this.db.getDatabaseStats();
 
     const html = Templates.dashboard(analytics, posts, dbStats);
+    return new Response(html, {
+      headers: { "Content-Type": "text/html" },
+    });
+  }
+
+  private async handleHomepage(): Promise<Response> {
+    const posts = await this.db.getAllPosts();
+    const html = Templates.homepage(posts);
     return new Response(html, {
       headers: { "Content-Type": "text/html" },
     });
